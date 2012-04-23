@@ -272,7 +272,7 @@ class xep_0045(base.base_plugin):
             return False
         return True
 
-    def setAffiliation(self, room, jid=None, nick=None, affiliation='member', ifrom=None):
+    def setAffiliation(self, room, jid=None, nick=None, affiliation='member', reason='', ifrom=None):
         """ Change room affiliation."""
         if affiliation not in ('outcast', 'member', 'admin', 'owner', 'none'):
             raise TypeError
@@ -281,6 +281,8 @@ class xep_0045(base.base_plugin):
             item = ET.Element('item', {'affiliation':affiliation, 'nick':nick})
         else:
             item = ET.Element('item', {'affiliation':affiliation, 'jid':jid})
+        ritem = ET.SubElement(item, 'reason')
+        ritem.text=reason
         query.append(item)
         iq = self.xmpp.makeIqSet(query)
         iq['to'] = room
@@ -374,3 +376,95 @@ class xep_0045(base.base_plugin):
         if room not in self.rooms.keys():
             return None
         return self.rooms[room].keys()
+    
+    def kick(self, room, jid=None, nick=None, reason='', ifrom=None):
+        """ Kick user."""
+        # TODO: check user is present
+        self.setRole(room, jid, nick, 'none', reason, ifrom)
+
+    def ban(self, room, jid=None, nick=None, reason='', ifrom=None):
+        """ Ban user."""
+        # TODO: check user is present
+        self.setAffiliation(room, jid, nick, 'outcast', reason, ifrom)
+
+    def setRole(self, room, jid=None, nick=None, role='participant', reason='',ifrom=None):
+        """ Alter room Role."""
+        if role not in ('none','visitor','participant','moderator'):
+            raise TypeError
+        query = ET.Element('{http://jabber.org/protocol/muc#admin}query')
+        if nick is not None:
+            item = ET.Element('item', {'role':role, 'nick':nick})
+        else:
+            item = ET.Element('item', {'role':role, 'jid':jid})
+        ritem = ET.SubElement(item, 'reason')
+        ritem.text=reason
+        query.append(item)
+        iq = self.xmpp.makeIqSet(query)
+        iq['to'] = room
+        iq['from'] = ifrom
+        # For now, swallow errors to preserve existing API
+        try:
+            result = iq.send()
+        except IqError:
+            return False
+        except IqTimeout:
+            return False
+        return True
+    
+    def getMembers(self, room, affiliation="member", ifrom=None, **kwargs):
+        """ 
+        Get the Room members for moderated rooms. 
+        
+        
+        Arguments:
+            room        -- the room
+            affiliation -- by default 'member' but you may require other affiliations
+            ifrom       -- Specifiy the sender's JID.
+            block       -- If true, block and wait for the stanzas' reply.
+            timeout     -- The time in seconds to block while waiting for
+                           a reply. If None, then wait indefinitely.
+            callback    -- Optional callback to execute when a reply is
+                           received instead of blocking and waiting for
+                           the reply.
+        """
+        query = ET.Element('{http://jabber.org/protocol/muc#admin}query')
+        item = ET.Element('item', {'affiliation': affiliation})
+        query.append(item)
+        iq = self.xmpp.makeIqSet(query)
+        iq['to'] = room
+        iq['from'] = ifrom
+        iq['type'] = 'get'
+        return iq.send(timeout=kwargs.get('timeout', None),
+                        block=kwargs.get('block', True),
+                        callback=kwargs.get('callback', None))
+        
+    def setNewMembers(self, room, members, ifrom=None, **kwargs):
+        """ 
+        Set the Room members for moderated rooms.
+        Here we need to send only alterations on the list given by getMembers
+        
+        Arguments:
+            room     -- the room
+            members  -- an array of members, each member is a dictionnary with 'jid' and 'affiliation' keys
+                        (set affiliation toNone to remove a member, else it's 'member','outcast','admin' or 'owner')
+                        Note that only the difference between results given by getMembers should be send
+                        with setMembers
+            ifrom    -- Specifiy the sender's JID.
+            block    -- If true, block and wait for the stanzas' reply.
+            timeout  -- The time in seconds to block while waiting for
+                        a reply. If None, then wait indefinitely.
+            callback -- Optional callback to execute when a reply is
+                        received instead of blocking and waiting for
+                        the reply.
+        """
+        query = ET.Element('{http://jabber.org/protocol/muc#admin}query')
+        for member in members:
+            item = ET.Element('item', {'jid':member['jid'],'affiliation':member['affiliation']})
+            query.append(item)
+        iq = self.xmpp.makeIqSet(query)
+        iq['to'] = room
+        iq['from'] = ifrom
+        iq['type'] = 'set'
+        return iq.send(timeout=kwargs.get('timeout', None),
+                        block=kwargs.get('block', True),
+                        callback=kwargs.get('callback', None))
