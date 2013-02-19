@@ -7,7 +7,11 @@
 """
 from __future__ import with_statement
 
+from xml.etree import cElementTree as ET
+from . import base
+
 import logging
+from sleekxmpp.xmlstream.stanzabase import registerStanzaPlugin
 
 from sleekxmpp import Presence
 from sleekxmpp.plugins import BasePlugin, register_plugin
@@ -108,23 +112,18 @@ class MUCPresence(ElementBase):
         log.warning("Cannot delete room through mucpresence plugin.")
         return self
 
-
-class XEP_0045(BasePlugin):
-
+class xep_0045(base.base_plugin):
     """
-    Implements XEP-0045 Multi-User Chat
+    Implements XEP-0045 Multi User Chat
     """
-
-    name = 'xep_0045'
-    description = 'XEP-0045: Multi-User Chat'
-    dependencies = set(['xep_0030', 'xep_0004'])
 
     def plugin_init(self):
         self.rooms = {}
         self.ourNicks = {}
         self.xep = '0045'
+        self.description = 'Multi User Chat'
         # load MUC support in presence stanzas
-        register_stanza_plugin(Presence, MUCPresence)
+        registerStanzaPlugin(Presence, MUCPresence)
         self.xmpp.registerHandler(Callback('MUCPresence', MatchXMLMask("<presence xmlns='%s' />" % self.xmpp.default_ns), self.handle_groupchat_presence))
         self.xmpp.registerHandler(Callback('MUCMessage', MatchXMLMask("<message xmlns='%s' type='groupchat'><body/></message>" % self.xmpp.default_ns), self.handle_groupchat_message))
         self.xmpp.registerHandler(Callback('MUCSubject', MatchXMLMask("<message xmlns='%s' type='groupchat'><subject/></message>" % self.xmpp.default_ns), self.handle_groupchat_subject))
@@ -204,7 +203,7 @@ class XEP_0045(BasePlugin):
             return False
         xform = result.xml.find('{http://jabber.org/protocol/muc#owner}query/{jabber:x:data}x')
         if xform is None: return False
-        form = self.xmpp.plugin['old_0004'].buildForm(xform)
+        form = self.xmpp.plugin['xep_0004'].buildForm(xform)
         return form
 
     def configureRoom(self, room, form=None, ifrom=None):
@@ -278,7 +277,7 @@ class XEP_0045(BasePlugin):
             return False
         return True
 
-    def setAffiliation(self, room, jid=None, nick=None, affiliation='member', ifrom=None):
+    def setAffiliation(self, room, jid=None, nick=None, affiliation='member', reason='', ifrom=None):
         """ Change room affiliation."""
         if affiliation not in ('outcast', 'member', 'admin', 'owner', 'none'):
             raise TypeError
@@ -287,6 +286,8 @@ class XEP_0045(BasePlugin):
             item = ET.Element('item', {'affiliation':affiliation, 'nick':nick})
         else:
             item = ET.Element('item', {'affiliation':affiliation, 'jid':jid})
+        ritem = ET.SubElement(item, 'reason')
+        ritem.text=reason
         query.append(item)
         iq = self.xmpp.makeIqSet(query)
         iq['to'] = room
@@ -380,6 +381,98 @@ class XEP_0045(BasePlugin):
         if room not in self.rooms.keys():
             return None
         return self.rooms[room].keys()
+    
+    def kick(self, room, jid=None, nick=None, reason='', ifrom=None):
+        """ Kick user."""
+        # TODO: check user is present
+        self.setRole(room, jid, nick, 'none', reason, ifrom)
+
+    def ban(self, room, jid=None, nick=None, reason='', ifrom=None):
+        """ Ban user."""
+        # TODO: check user is present
+        self.setAffiliation(room, jid, nick, 'outcast', reason, ifrom)
+
+    def setRole(self, room, jid=None, nick=None, role='participant', reason='',ifrom=None):
+        """ Alter room Role."""
+        if role not in ('none','visitor','participant','moderator'):
+            raise TypeError
+        query = ET.Element('{http://jabber.org/protocol/muc#admin}query')
+        if nick is not None:
+            item = ET.Element('item', {'role':role, 'nick':nick})
+        else:
+            item = ET.Element('item', {'role':role, 'jid':jid})
+        ritem = ET.SubElement(item, 'reason')
+        ritem.text=reason
+        query.append(item)
+        iq = self.xmpp.makeIqSet(query)
+        iq['to'] = room
+        iq['from'] = ifrom
+        # For now, swallow errors to preserve existing API
+        try:
+            result = iq.send()
+        except IqError:
+            return False
+        except IqTimeout:
+            return False
+        return True
+    
+    def getMembers(self, room, affiliation="member", ifrom=None, **kwargs):
+        """ 
+        Get the Room members for moderated rooms. 
+        
+        
+        Arguments:
+            room        -- the room
+            affiliation -- by default 'member' but you may require other affiliations
+            ifrom       -- Specifiy the sender's JID.
+            block       -- If true, block and wait for the stanzas' reply.
+            timeout     -- The time in seconds to block while waiting for
+                           a reply. If None, then wait indefinitely.
+            callback    -- Optional callback to execute when a reply is
+                           received instead of blocking and waiting for
+                           the reply.
+        """
+        query = ET.Element('{http://jabber.org/protocol/muc#admin}query')
+        item = ET.Element('item', {'affiliation': affiliation})
+        query.append(item)
+        iq = self.xmpp.makeIqSet(query)
+        iq['to'] = room
+        iq['from'] = ifrom
+        iq['type'] = 'get'
+        return iq.send(timeout=kwargs.get('timeout', None),
+                        block=kwargs.get('block', True),
+                        callback=kwargs.get('callback', None))
+        
+    def setNewMembers(self, room, members, ifrom=None, **kwargs):
+        """ 
+        Set the Room members for moderated rooms.
+        Here we need to send only alterations on the list given by getMembers
+        
+        Arguments:
+            room     -- the room
+            members  -- an array of members, each member is a dictionnary with 'jid' and 'affiliation' keys
+                        (set affiliation toNone to remove a member, else it's 'member','outcast','admin' or 'owner')
+                        Note that only the difference between results given by getMembers should be send
+                        with setMembers
+            ifrom    -- Specifiy the sender's JID.
+            block    -- If true, block and wait for the stanzas' reply.
+            timeout  -- The time in seconds to block while waiting for
+                        a reply. If None, then wait indefinitely.
+            callback -- Optional callback to execute when a reply is
+                        received instead of blocking and waiting for
+                        the reply.
+        """
+        query = ET.Element('{http://jabber.org/protocol/muc#admin}query')
+        for member in members:
+            item = ET.Element('item', {'jid':member['jid'],'affiliation':member['affiliation']})
+            query.append(item)
+        iq = self.xmpp.makeIqSet(query)
+        iq['to'] = room
+        iq['from'] = ifrom
+        iq['type'] = 'set'
+        return iq.send(timeout=kwargs.get('timeout', None),
+                        block=kwargs.get('block', True),
+                        callback=kwargs.get('callback', None))
 
 
-register_plugin(XEP_0045)
+register_plugin(xep_0045)
